@@ -6,52 +6,36 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Dict, List
 from pathlib import Path
-from io import BytesIO
-import xml.etree.ElementTree as ET
 from datetime import datetime
+import xml.etree.ElementTree as ET
 import uvicorn
-from io import BytesIO
-import xml.etree.ElementTree as ET
-from datetime import datetime
 
-# Per-night metrics, one entry per date
-nights = []  # list of dicts: { "date": "YYYY-MM-DD", "total_sleep_hours": float, "avg_hr": float|None, "avg_hrv": float|None, "avg_resp": float|None }
-MAX_NIGHTS = 30
-def get_recent_nights():
-    """
-    Return up to the most recent MAX_NIGHTS entries from 'nights',
-    sorted by date ascending.
-    """
-    if not nights:
-        return []
-
-    sorted_nights = sorted(nights, key=lambda n: n["date"])
-    return sorted_nights[-MAX_NIGHTS:]
-
-
-
-
-# Path to React build folder
-FRONTEND_DIR = Path(__file__).parent / "build"
+# ---------------------------------------------------------
+# FastAPI app + CORS + frontend build serving
+# ---------------------------------------------------------
 
 app = FastAPI(title="Sleep Health Insight API", docs_url="/docs")
 
-# --- CORS: allow React dev + deployed clients ---
+# Allow React dev / deployed clients (okay for class project)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # fine for class project
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Serve React static files (only if build exists) ---
+# Path to React build folder (copied into backend/build)
+FRONTEND_DIR = Path(__file__).parent / "build"
+
+# Serve React static assets if build exists
 if FRONTEND_DIR.exists():
     app.mount(
         "/static",
         StaticFiles(directory=FRONTEND_DIR / "static"),
         name="static",
     )
+
 
 @app.get("/")
 async def serve_frontend():
@@ -60,18 +44,48 @@ async def serve_frontend():
     If the build folder is missing, return a clear 404 error.
     """
     if not FRONTEND_DIR.exists():
-        raise HTTPException(status_code=404, detail="Frontend build not found. Run npm run build and copy to backend/build.")
+        raise HTTPException(
+            status_code=404,
+            detail="Frontend build not found. Run `npm run build` and copy to backend/build.",
+        )
     index_file = FRONTEND_DIR / "index.html"
     if not index_file.exists():
         raise HTTPException(status_code=404, detail="index.html not found in frontend build.")
     return FileResponse(index_file)
 
 
-# --------- Sleep data handling ---------
-sleep_records: List[dict] = []  # {start, end, duration_hours}
-def parse_apple_health_sleep_xml(file_bytes: bytes):
+# ---------------------------------------------------------
+# Sleep data handling (global in-memory cache)
+# ---------------------------------------------------------
+
+# Per-night metrics, one entry per date:
+# {
+#   "date": "YYYY-MM-DD",
+#   "total_sleep_hours": float,
+#   "avg_hr": float|None,
+#   "avg_hrv": float|None,
+#   "avg_resp": float|None
+# }
+nights: List[Dict] = []
+MAX_NIGHTS = 30
+
+
+def get_recent_nights() -> List[Dict]:
     """
-    Parse Apple Health XML and populate global 'nights' with per-night metrics:
+    Return up to the most recent MAX_NIGHTS entries from 'nights',
+    sorted by date ascending.
+    """
+    if not nights:
+        return []
+    sorted_nights = sorted(nights, key=lambda n: n["date"])
+    return sorted_nights[-MAX_NIGHTS:]
+
+
+def parse_apple_health_sleep_xml_stream(file_obj) -> None:
+    """
+    Stream-parse Apple Health XML to avoid loading it all into memory.
+
+    Populates global 'nights' with per-night metrics:
       - total_sleep_hours
       - average heart rate
       - average HRV
@@ -80,10 +94,9 @@ def parse_apple_health_sleep_xml(file_bytes: bytes):
     global nights
     nights = []
 
-    # Temporary structure keyed by date
-    nightly_raw = {}  # date_str -> dict of lists
+    nightly_raw: Dict[str, Dict[str, List[float]]] = {}
 
-    def get_bucket(date_str: str):
+    def get_bucket(date_str: str) -> Dict[str, List[float]]:
         if date_str not in nightly_raw:
             nightly_raw[date_str] = {
                 "sleep_durations": [],
@@ -93,61 +106,74 @@ def parse_apple_health_sleep_xml(file_bytes: bytes):
             }
         return nightly_raw[date_str]
 
-    tree = ET.parse(BytesIO(file_bytes))
-    root = tree.getroot()
-
-    # Apple Health timestamps usually look like: "2024-11-01 01:23:45 -0500"
+    # Apple Health timestamps look like: "2024-11-01 01:23:45 -0500"
     dt_fmt = "%Y-%m-%d %H:%M:%S %z"
 
-    for record in root.findall("Record"):
-        r_type = record.get("type", "")
-        start_str = record.get("startDate")
-        end_str = record.get("endDate")
-        value_str = record.get("value")
+    # Make sure we read from the start of the file
+    try:
+        file_obj.seek(0)
+    except Exception:
+        pass
 
-        # We need a start date for all metrics
-        if not start_str:
-            continue
-        try:
-            start_dt = datetime.strptime(start_str, dt_fmt)
-        except Exception:
-            continue
+    context = ET.iterparse(file_obj, events=("start", "end"))
+    _, root = next(context)  # get root element
 
-        date_str = start_dt.date().isoformat()
-        bucket = get_bucket(date_str)
+    for event, elem in context:
+        if event == "end" and elem.tag == "Record":
+            r_type = elem.get("type", "")
+            start_str = elem.get("startDate")
+            end_str = elem.get("endDate")
+            value_str = elem.get("value")
 
-        # ---- Sleep (duration) ----
-        if "SleepAnalysis" in r_type and end_str:
+            if not start_str:
+                elem.clear()
+                continue
+
             try:
-                end_dt = datetime.strptime(end_str, dt_fmt)
-                duration_hours = (end_dt - start_dt).total_seconds() / 3600.0
-                bucket["sleep_durations"].append(duration_hours)
+                start_dt = datetime.strptime(start_str, dt_fmt)
             except Exception:
-                pass
+                elem.clear()
+                continue
 
-        # ---- Heart Rate ----
-        elif "HeartRate" in r_type and "Variability" not in r_type and value_str:
-            try:
-                hr = float(value_str)
-                bucket["hr_values"].append(hr)
-            except Exception:
-                pass
+            date_str = start_dt.date().isoformat()
+            bucket = get_bucket(date_str)
 
-        # ---- Heart Rate Variability (SDNN) ----
-        elif "HeartRateVariability" in r_type and value_str:
-            try:
-                hrv = float(value_str)  # typically in ms
-                bucket["hrv_values"].append(hrv)
-            except Exception:
-                pass
+            # ---- Sleep (duration) ----
+            if "SleepAnalysis" in r_type and end_str:
+                try:
+                    end_dt = datetime.strptime(end_str, dt_fmt)
+                    duration_hours = (end_dt - start_dt).total_seconds() / 3600.0
+                    bucket["sleep_durations"].append(duration_hours)
+                except Exception:
+                    pass
 
-        # ---- Respiratory Rate ----
-        elif "RespiratoryRate" in r_type and value_str:
-            try:
-                resp = float(value_str)  # breaths per minute
-                bucket["resp_values"].append(resp)
-            except Exception:
-                pass
+            # ---- Heart Rate ----
+            elif "HeartRate" in r_type and "Variability" not in r_type and value_str:
+                try:
+                    hr = float(value_str)
+                    bucket["hr_values"].append(hr)
+                except Exception:
+                    pass
+
+            # ---- Heart Rate Variability (SDNN) ----
+            elif "HeartRateVariability" in r_type and value_str:
+                try:
+                    hrv = float(value_str)
+                    bucket["hrv_values"].append(hrv)
+                except Exception:
+                    pass
+
+            # ---- Respiratory Rate ----
+            elif "RespiratoryRate" in r_type and value_str:
+                try:
+                    resp = float(value_str)
+                    bucket["resp_values"].append(resp)
+                except Exception:
+                    pass
+
+            # free memory for processed elements
+            elem.clear()
+            root.clear()
 
     # Collapse nightly_raw into the 'nights' list with averages
     nights = []
@@ -169,26 +195,28 @@ def parse_apple_health_sleep_xml(file_bytes: bytes):
         )
 
 
+# ---------------------------------------------------------
+# API endpoints
+# ---------------------------------------------------------
 
-
-# --------- API endpoints ---------
 @app.get("/health")
 def health():
     return {"ok": True}
 
 
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...)):
     """
-    Upload Apple Health XML and parse sleep records.
+    Upload Apple Health export and build per-night metrics.
+    Uses streaming parse to stay within 512MB on Render.
     """
-    if not file.filename.endswith(".xml"):
-        raise HTTPException(status_code=400, detail="Please upload an Apple Health XML (.xml) file.")
-    content = await file.read()
-    parse_apple_health_sleep_xml(content)
-    if not nights:
-        return {"message": "File uploaded, but no sleep records were detected."}
-    return {"message": f"File uploaded. Parsed {len(nights)} nights of data."}
+    parse_apple_health_sleep_xml_stream(file.file)
+
+    return {
+        "message": "File uploaded",
+        "nights": len(get_recent_nights()),
+    }
+
 
 @app.get("/summary")
 def summary():
@@ -223,14 +251,12 @@ def summary():
     }
 
 
-
-
 class ScoreRequest(BaseModel):
     features: Dict[str, float]
 
 
 @app.post("/sleep-score")
-def sleep_score(_=None):
+def sleep_score(_body: ScoreRequest | None = None):
     """
     Compute a composite Sleep Score using:
       - total sleep duration
@@ -319,12 +345,13 @@ def sleep_score(_=None):
 
     final_score = round(final_score, 1)
 
-    explanation_parts = []
-    explanation_parts.append(f"Duration component: {avg_duration_score:.1f}")
-    explanation_parts.append(f"Regularity component: {regularity_score:.1f}")
-    explanation_parts.append(f"Heart rate component: {hr_score:.1f}")
-    explanation_parts.append(f"HRV component: {hrv_score:.1f}")
-    explanation_parts.append(f"Respiratory rate component: {resp_score:.1f}")
+    explanation_parts = [
+        f"Duration component: {avg_duration_score:.1f}",
+        f"Regularity component: {regularity_score:.1f}",
+        f"Heart rate component: {hr_score:.1f}",
+        f"HRV component: {hrv_score:.1f}",
+        f"Respiratory rate component: {resp_score:.1f}",
+    ]
     explanation = " | ".join(explanation_parts)
 
     return {
@@ -342,7 +369,8 @@ def sleep_score(_=None):
     }
 
 
-
-
+# ---------------------------------------------------------
+# Local dev entrypoint
+# ---------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8001, reload=True)
