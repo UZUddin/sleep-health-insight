@@ -37,6 +37,8 @@ export default function Charts({ nights }) {
   const hr = nights.map((n) => (n.avg_hr ?? null));
   const hrv = nights.map((n) => (n.avg_hrv ?? null));
   const resp = nights.map((n) => (n.avg_resp ?? null));
+  const rem = nights.map((n) => (n.rem_hours ?? null));
+  const nonrem = nights.map((n) => (n.non_rem_hours ?? null));
 
   const opts = {
     responsive: true,
@@ -47,6 +49,13 @@ export default function Charts({ nights }) {
     },
     interaction: { mode: "index" },
     scales: { x: { ticks: { maxRotation: 0 } } },
+  };
+  const optsStack = {
+    ...opts,
+    scales: {
+      ...opts.scales,
+      y: { stacked: true },
+    },
   };
 
   return (
@@ -66,6 +75,19 @@ export default function Charts({ nights }) {
       <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
         <h3 style={{ margin: 0, marginBottom: 8 }}>Average Respiratory Rate</h3>
         <Line data={buildDataset(labels, resp, "Avg Respiratory", "#f59e0b")} options={opts} />
+      </div>
+      <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
+        <h3 style={{ margin: 0, marginBottom: 8 }}>REM vs Non-REM Sleep Hours</h3>
+        <Line
+          data={{
+            labels,
+            datasets: [
+              { label: "REM", data: rem, borderColor: "#8b5cf6", backgroundColor: "#8b5cf6", tension: 0.3, pointRadius: 2, fill: true, stack: "sleep" },
+              { label: "Non-REM", data: nonrem, borderColor: "#22c55e", backgroundColor: "#22c55e", tension: 0.3, pointRadius: 2, fill: true, stack: "sleep" },
+            ],
+          }}
+          options={optsStack}
+        />
       </div>
     </div>
   );

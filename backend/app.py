@@ -94,33 +94,38 @@ def parse_apple_health_sleep_xml_stream(file_obj) -> None:
     global nights
     nights = []
 
-    nightly_raw: Dict[str, Dict[str, List[float]]] = {}
+    sleep_segments = []
+    hr_points = []
+    hrv_points = []
+    resp_points = []
 
-    def get_bucket(date_str: str) -> Dict[str, List[float]]:
-        if date_str not in nightly_raw:
-            nightly_raw[date_str] = {
-                "sleep_durations": [],
-                "hr_values": [],
-                "hrv_values": [],
-                "resp_values": [],
-            }
-        return nightly_raw[date_str]
-
-    # Apple Health timestamps look like: "2024-11-01 01:23:45 -0500"
     dt_fmt = "%Y-%m-%d %H:%M:%S %z"
 
-    # Make sure we read from the start of the file
     try:
         file_obj.seek(0)
     except Exception:
         pass
 
     context = ET.iterparse(file_obj, events=("start", "end"))
-    _, root = next(context)  # get root element
+    _, root = next(context)
+
+    def map_stage(value_str: str | None) -> str:
+        if not value_str:
+            return "ASLEEP"
+        v = value_str.upper()
+        if "REM" in v:
+            return "ASLEEP_REM"
+        if "DEEP" in v:
+            return "ASLEEP_DEEP"
+        if "CORE" in v:
+            return "ASLEEP_CORE"
+        if "ASLEEP" in v:
+            return "ASLEEP"
+        return "ASLEEP"
 
     for event, elem in context:
         if event == "end" and elem.tag == "Record":
-            r_type = elem.get("type", "")
+            r_type = elem.get("type") or ""
             start_str = elem.get("startDate")
             end_str = elem.get("endDate")
             value_str = elem.get("value")
@@ -135,39 +140,30 @@ def parse_apple_health_sleep_xml_stream(file_obj) -> None:
                 elem.clear()
                 continue
 
-            date_str = start_dt.date().isoformat()
-            bucket = get_bucket(date_str)
-
-            # ---- Sleep (duration) ----
-            if "SleepAnalysis" in r_type and end_str:
+                        # ---- Sleep (duration) ----
+            if ("SleepAnalysis" in r_type) and end_str:
                 try:
                     end_dt = datetime.strptime(end_str, dt_fmt)
-                    duration_hours = (end_dt - start_dt).total_seconds() / 3600.0
-                    bucket["sleep_durations"].append(duration_hours)
+                    stage = map_stage(value_str)
+                    sleep_segments.append((start_dt, end_dt, stage))
                 except Exception:
                     pass
-
-            # ---- Heart Rate ----
-            elif "HeartRate" in r_type and "Variability" not in r_type and value_str:
+                            # ---- Heart Rate ----
+            elif ("HeartRate" in r_type) and ("Variability" not in r_type) and value_str:
                 try:
-                    hr = float(value_str)
-                    bucket["hr_values"].append(hr)
+                    hr_points.append((start_dt, float(value_str)))
                 except Exception:
                     pass
-
-            # ---- Heart Rate Variability (SDNN) ----
-            elif "HeartRateVariability" in r_type and value_str:
+                     # ---- Heart Rate Variability (SDNN) ----
+            elif ("HeartRateVariability" in r_type) and value_str:
                 try:
-                    hrv = float(value_str)
-                    bucket["hrv_values"].append(hrv)
+                    hrv_points.append((start_dt, float(value_str)))
                 except Exception:
                     pass
-
-            # ---- Respiratory Rate ----
-            elif "RespiratoryRate" in r_type and value_str:
+                        # ---- Respiratory Rate ----
+            elif ("RespiratoryRate" in r_type) and value_str:
                 try:
-                    resp = float(value_str)
-                    bucket["resp_values"].append(resp)
+                    resp_points.append((start_dt, float(value_str)))
                 except Exception:
                     pass
 
@@ -175,19 +171,54 @@ def parse_apple_health_sleep_xml_stream(file_obj) -> None:
             elem.clear()
             root.clear()
 
-    # Collapse nightly_raw into the 'nights' list with averages
-    nights = []
-    for date_str, raw in nightly_raw.items():
-        total_sleep_hours = sum(raw["sleep_durations"]) if raw["sleep_durations"] else 0.0
+    asleep_segments = [s for s in sleep_segments if s[2] and ("ASLEEP" in s[2])]
 
-        avg_hr = sum(raw["hr_values"]) / len(raw["hr_values"]) if raw["hr_values"] else None
-        avg_hrv = sum(raw["hrv_values"]) / len(raw["hrv_values"]) if raw["hrv_values"] else None
-        avg_resp = sum(raw["resp_values"]) / len(raw["resp_values"]) if raw["resp_values"] else None
+    nights_map: Dict[str, Dict[str, List]] = {}
+
+    def nb(date_str: str) -> Dict[str, List]:
+        if date_str not in nights_map:
+            nights_map[date_str] = {"segments": [], "hr": [], "hrv": [], "resp": []}
+        return nights_map[date_str]
+
+    for s_start, s_end, stage in asleep_segments:
+        night_date = s_start.date().isoformat()
+        nb(night_date)["segments"].append((s_start, s_end, stage))
+
+    def assign_points(points: List, key: str) -> None:
+        for ts, val in points:
+            for s_start, s_end, _stage in asleep_segments:
+                if s_start <= ts <= s_end:
+                    night_date = s_start.date().isoformat()
+                    nb(night_date)[key].append(val)
+                    break
+
+    assign_points(hr_points, "hr")
+    assign_points(hrv_points, "hrv")
+    assign_points(resp_points, "resp")
+
+    nights = []
+    for date_str, raw in nights_map.items():
+        total_sleep_hours = 0.0
+        rem_hours = 0.0
+        non_rem_hours = 0.0
+        for s_start, s_end, stage in raw["segments"]:
+            dur = (s_end - s_start).total_seconds() / 3600.0
+            total_sleep_hours += dur
+            if stage and ("REM" in stage):
+                rem_hours += dur
+            else:
+                non_rem_hours += dur
+
+        avg_hr = (sum(raw["hr"]) / len(raw["hr"])) if raw["hr"] else None
+        avg_hrv = (sum(raw["hrv"]) / len(raw["hrv"])) if raw["hrv"] else None
+        avg_resp = (sum(raw["resp"]) / len(raw["resp"])) if raw["resp"] else None
 
         nights.append(
             {
                 "date": date_str,
                 "total_sleep_hours": total_sleep_hours,
+                "rem_hours": rem_hours,
+                "non_rem_hours": non_rem_hours,
                 "avg_hr": avg_hr,
                 "avg_hrv": avg_hrv,
                 "avg_resp": avg_resp,

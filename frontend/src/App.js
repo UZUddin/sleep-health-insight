@@ -7,6 +7,18 @@ function App() {
   const [score, setScore] = useState(null);
   const [nights, setNights] = useState(null);
   const [loading, setLoading] = useState(false);
+  const remAvg = nights && !nights?.error ? (() => {
+    const vals = nights.map(n => n.rem_hours ?? 0);
+    if (!vals.length) return null;
+    const sum = vals.reduce((a,b)=>a+b,0);
+    return (sum/vals.length).toFixed(2);
+  })() : null;
+  const nonRemAvg = nights && !nights?.error ? (() => {
+    const vals = nights.map(n => n.non_rem_hours ?? 0);
+    if (!vals.length) return null;
+    const sum = vals.reduce((a,b)=>a+b,0);
+    return (sum/vals.length).toFixed(2);
+  })() : null;
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
@@ -182,7 +194,16 @@ function App() {
           <p style={{ marginTop: 16, color: "red" }}>Error: {score.error}</p>
         )}
 
-        {nights && !nights.error && <Charts nights={nights} />}
+        {nights && !nights.error && (
+          <>
+            <div style={{ marginTop: 16 }}>
+              <h3>Sleep Stages</h3>
+              <p><strong>Avg REM:</strong> {remAvg ?? "-"} h</p>
+              <p><strong>Avg Non-REM:</strong> {nonRemAvg ?? "-"} h</p>
+            </div>
+            <Charts nights={nights} />
+          </>
+        )}
         {nights && nights.error && (
           <p style={{ marginTop: 16, color: "red" }}>Error: {nights.error}</p>
         )}
