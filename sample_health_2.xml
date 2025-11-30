@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<HealthData locale="en_US">
+  <!-- Two heart-rate points on Jan 2, 2025 03:14 +0500 -->
+  <Record type="HKQuantityTypeIdentifierHeartRate" unit="count/min" value="72"
+          startDate="2025-01-02 03:14:00 -0500" endDate="2025-01-02 03:14:00 -0500"/>
+  <Record type="HKQuantityTypeIdentifierHeartRate" unit="count/min" value="68"
+          startDate="2025-01-02 03:19:00 -0500" endDate="2025-01-02 03:19:00 -0500"/>
+
+  <!-- One sleep epoch on Jan 1, 2025 23:00 to Jan 2, 2025 07:00 (local -0500) -->
+  <Record type="HKCategoryTypeIdentifierSleepAnalysis" value="1"
+          startDate="2025-01-01 23:00:00 -0500" endDate="2025-01-02 07:00:00 -0500"/>
+</HealthData>
