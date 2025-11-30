@@ -251,6 +251,14 @@ def summary():
     }
 
 
+@app.get("/nights")
+def nights_series():
+    recent = get_recent_nights()
+    if not recent:
+        raise HTTPException(status_code=400, detail="No sleep data available. Upload a file first.")
+    return recent
+
+
 class ScoreRequest(BaseModel):
     features: Dict[str, float]
 
