@@ -1,6 +1,8 @@
 # **Sleep Health Insight**
+🔗 Live Demo: https://sleep-health-insight.onrender.com
 
 *A web-based dashboard for analyzing Apple Health sleep data.*
+
 
 Sleep Health Insight lets users upload their **Apple Health export (ZIP/XML)** and instantly view analytics, trends, visualizations, and a computed **Sleep Health Score**. All processing is local and privacy-preserving.
 
@@ -25,6 +27,10 @@ Sleep Health Insight lets users upload their **Apple Health export (ZIP/XML)** a
 **Frontend:** React (Chart.js)
 **Backend:** FastAPI (Python)
 **Data:** Apple Health XML → nightly metrics
+
+## **Live Deployment**
+Accessible here:
+https://sleep-health-insight.onrender.com
 
 ## **Installation**
 
