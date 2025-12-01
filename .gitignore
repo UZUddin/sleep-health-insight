@@ -1,0 +1,6 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+.venv
+.venv312
+backend/__pycache__/app.cpython-312.pyc
+backend/__pycache__/app.cpython-314.pyc

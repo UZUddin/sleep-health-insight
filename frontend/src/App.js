@@ -1,10 +1,24 @@
 import React, { useState } from "react";
+import Charts from "./Charts";
 
 function App() {
   const [uploadMessage, setUploadMessage] = useState("");
   const [summary, setSummary] = useState(null);
   const [score, setScore] = useState(null);
+  const [nights, setNights] = useState(null);
   const [loading, setLoading] = useState(false);
+  const remAvg = nights && !nights?.error ? (() => {
+    const vals = nights.map(n => n.rem_hours ?? 0);
+    if (!vals.length) return null;
+    const sum = vals.reduce((a,b)=>a+b,0);
+    return (sum/vals.length).toFixed(2);
+  })() : null;
+  const nonRemAvg = nights && !nights?.error ? (() => {
+    const vals = nights.map(n => n.non_rem_hours ?? 0);
+    if (!vals.length) return null;
+    const sum = vals.reduce((a,b)=>a+b,0);
+    return (sum/vals.length).toFixed(2);
+  })() : null;
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
@@ -17,6 +31,7 @@ function App() {
     setUploadMessage("");
     setSummary(null);
     setScore(null);
+    setNights(null);
 
     try {
       const res = await fetch("/upload", {
@@ -82,6 +97,23 @@ function App() {
     }
   };
 
+  const fetchNights = async () => {
+    setLoading(true);
+    setNights(null);
+    try {
+      const res = await fetch("/nights");
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Error getting nights");
+      }
+      setNights(data);
+    } catch (err) {
+      setNights({ error: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -127,7 +159,8 @@ function App() {
         <button onClick={fetchSummary} style={{ marginRight: 8 }}>
           View Sleep Summary
         </button>
-        <button onClick={fetchScore}>Get Sleep Score</button>
+        <button onClick={fetchScore} style={{ marginRight: 8 }}>Get Sleep Score</button>
+        <button onClick={fetchNights}>View Trends</button>
 
         {summary && !summary.error && (
           <div style={{ marginTop: 16 }}>
@@ -159,6 +192,20 @@ function App() {
         )}
         {score && score.error && (
           <p style={{ marginTop: 16, color: "red" }}>Error: {score.error}</p>
+        )}
+
+        {nights && !nights.error && (
+          <>
+            <div style={{ marginTop: 16 }}>
+              <h3>Sleep Stages</h3>
+              <p><strong>Avg REM:</strong> {remAvg ?? "-"} h</p>
+              <p><strong>Avg Non-REM:</strong> {nonRemAvg ?? "-"} h</p>
+            </div>
+            <Charts nights={nights} />
+          </>
+        )}
+        {nights && nights.error && (
+          <p style={{ marginTop: 16, color: "red" }}>Error: {nights.error}</p>
         )}
       </section>
     </div>
