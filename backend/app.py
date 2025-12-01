@@ -10,13 +10,15 @@ from datetime import datetime
 import xml.etree.ElementTree as ET
 import uvicorn
 
+from zipfile import ZipFile
+from io import BytesIO
+
 # ---------------------------------------------------------
-# FastAPI app + CORS + frontend build serving
+# FastAPI app + CORS
 # ---------------------------------------------------------
 
 app = FastAPI(title="Sleep Health Insight API", docs_url="/docs")
 
-# Allow React dev / deployed clients (okay for class project)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,10 +27,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Path to React build folder (copied into backend/build)
+# ---------------------------------------------------------
+# Frontend build (if present)
+# ---------------------------------------------------------
+
 FRONTEND_DIR = Path(__file__).parent / "build"
 
-# Serve React static assets if build exists
+# Serve static assets if build exists
 if FRONTEND_DIR.exists():
     app.mount(
         "/static",
@@ -70,6 +75,7 @@ async def serve_frontend():
 #   "avg_resp": float | None,
 # }
 nights: List[Dict] = []
+summary_cache: Optional[Dict] = None
 MAX_NIGHTS = 30
 
 
@@ -82,6 +88,38 @@ def get_recent_nights() -> List[Dict]:
         return []
     sorted_n = sorted(nights, key=lambda n: n["date"])
     return sorted_n[-MAX_NIGHTS:]
+
+
+def compute_sleep_summary(nights_list: List[Dict]) -> Dict:
+    """
+    Take the nights list and compute the summary that the frontend expects.
+    """
+    if not nights_list:
+        return {}
+
+    n = len(nights_list)
+
+    avg_total_sleep = sum(night["total_sleep_hours"] for night in nights_list) / n
+
+    def safe_avg(key: str):
+        vals = [night[key] for night in nights_list if night.get(key) is not None]
+        if not vals:
+            return None
+        return sum(vals) / len(vals)
+
+    avg_hr = safe_avg("avg_hr")
+    avg_hrv = safe_avg("avg_hrv")
+    avg_resp = safe_avg("avg_resp")
+    avg_rem_pct = safe_avg("rem_percentage")
+
+    return {
+        "nights": n,
+        "avg_total_sleep": round(avg_total_sleep, 2),
+        "avg_hr": round(avg_hr, 1) if avg_hr is not None else None,
+        "avg_hrv": round(avg_hrv, 1) if avg_hrv is not None else None,
+        "avg_resp_rate": round(avg_resp, 1) if avg_resp is not None else None,
+        "avg_rem_pct": round(avg_rem_pct, 1) if avg_rem_pct is not None else None,
+    }
 
 
 def parse_apple_health_sleep_xml_stream(file_obj) -> None:
@@ -110,9 +148,9 @@ def parse_apple_health_sleep_xml_stream(file_obj) -> None:
 
     # Ensure we read from the beginning
     try:
-      file_obj.seek(0)
+        file_obj.seek(0)
     except Exception:
-      pass
+        pass
 
     context = ET.iterparse(file_obj, events=("start", "end"))
     _, root = next(context)  # Grab root
@@ -273,57 +311,73 @@ def health():
 
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload(file: UploadFile = File(...)):
     """
-    Upload Apple Health export and build per-night metrics.
-    Uses streaming parse to stay within 512MB on Render.
+    Accepts either export.xml directly or the full Apple Health ZIP export.
+    Parses sleep data into global `nights` and caches a summary.
     """
-    parse_apple_health_sleep_xml_stream(file.file)
+    if not file:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    filename = (file.filename or "").lower()
+    raw_bytes = await file.read()
+
+    # 1) Extract XML bytes (from ZIP or raw XML)
+    if filename.endswith(".zip"):
+        try:
+            with ZipFile(BytesIO(raw_bytes)) as z:
+                candidates = [
+                    name for name in z.namelist()
+                    if name.lower().endswith("export.xml")
+                ]
+                if not candidates:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="No export.xml file found in the Apple Health ZIP."
+                    )
+                xml_bytes = z.read(candidates[0])
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not read ZIP file: {e}"
+            )
+    else:
+        # assume the uploaded file is export.xml directly
+        xml_bytes = raw_bytes
+
+    # 2) Call streaming parser on a file-like object
+    try:
+        file_like = BytesIO(xml_bytes)
+        parse_apple_health_sleep_xml_stream(file_like)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error parsing Apple Health XML: {e}"
+        )
+
+    # 3) Compute and cache summary from global `nights`
+    global summary_cache
+    summary_cache = compute_sleep_summary(nights)
 
     return {
-        "message": "File uploaded",
-        "nights": len(get_recent_nights()),
+        "message": "Apple Health data uploaded and parsed successfully.",
+        "nights": len(nights),
     }
 
 
 @app.get("/summary")
-def summary():
-    recent = get_recent_nights()
-    if not recent:
-        raise HTTPException(status_code=400, detail="No sleep data available. Upload a file first.")
-
-    n_nights = len(recent)
-
-    avg_sleep = sum(n["total_sleep_hours"] for n in recent) / n_nights
-
-    hr_values = [n["avg_hr"] for n in recent if n["avg_hr"] is not None]
-    hrv_values = [n["avg_hrv"] for n in recent if n["avg_hrv"] is not None]
-    resp_values = [n["avg_resp"] for n in recent if n["avg_resp"] is not None]
-    rem_pct_values = [
-        n["rem_percentage"] for n in recent if n.get("rem_percentage") is not None
-    ]
-
-    avg_hr_overall = sum(hr_values) / len(hr_values) if hr_values else None
-    avg_hrv_overall = sum(hrv_values) / len(hrv_values) if hrv_values else None
-    avg_resp_overall = sum(resp_values) / len(resp_values) if resp_values else None
-    avg_rem_pct_overall = (
-        sum(rem_pct_values) / len(rem_pct_values) if rem_pct_values else None
-    )
-
-    dates = [n["date"] for n in recent]
-    first_night = min(dates)
-    last_night = max(dates)
-
-    return {
-        "n_nights": n_nights,
-        "avg_sleep_hours": round(avg_sleep, 2),
-        "first_night": first_night,
-        "last_night": last_night,
-        "avg_hr": round(avg_hr_overall, 1) if avg_hr_overall is not None else None,
-        "avg_hrv": round(avg_hrv_overall, 1) if avg_hrv_overall is not None else None,
-        "avg_resp_rate": round(avg_resp_overall, 1) if avg_resp_overall is not None else None,
-        "avg_rem_pct": round(avg_rem_pct_overall, 1) if avg_rem_pct_overall is not None else None,
-    }
+def get_summary():
+    """
+    Return the cached summary from the most recent upload.
+    """
+    if not summary_cache:
+        raise HTTPException(
+            status_code=400,
+            detail="No data available. Upload your Apple Health export first."
+        )
+    return summary_cache
 
 
 @app.get("/nights")

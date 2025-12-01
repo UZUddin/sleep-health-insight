@@ -291,16 +291,16 @@ function App() {
         <Card title="Upload Apple Health export" step={1}>
           <p className="card-text">
             Export your Apple Health data from your iPhone and upload the{" "}
-            <strong>export.xml</strong> file here.
+            <strong>export.zip</strong> or extract the <strong>export.xml</strong> file here.
           </p>
           <label className="file-input-label">
             <input
               type="file"
-              accept=".xml"
+              accept=".xml, .zip"
               onChange={handleFileUpload}
               className="file-input"
             />
-            <span>Choose XML file</span>
+            <span>Choose XML or ZIP file</span>
           </label>
 
           {uploadMessage && (
